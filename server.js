@@ -3,8 +3,9 @@ const ytdl = require('@distube/ytdl-core');
 const fs = require('fs');
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
-
+const statusMonitor = require('express-status-monitor');
 const app = express();
+app.use(statusMonitor()); // ← this must come before other routes
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
