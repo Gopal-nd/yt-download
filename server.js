@@ -1,88 +1,93 @@
 const express = require('express');
-const path = require('path');
-const fs = require('fs');
 const ytdl = require('@distube/ytdl-core');
-const { exec } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const ffmpeg = require('fluent-ffmpeg');
 
 const app = express();
-const PORT = 3000;
 
 app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 app.set('view engine', 'ejs');
-app.set('views', path.join(__dirname, 'views'));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static('public'));
 
-// Sanitize filename helper
 function sanitizeFilename(name) {
-  return name.replace(/[<>:"/\\|?*\x00-\x1F]/g, '').replace(/\s+/g, '_').substring(0, 100);
+  return name.replace(/[<>:"/\\|?*\x00-\x1F]/g, '') // Remove invalid chars
+    .replace(/\s+/g, '_') // Replace spaces with underscores
+    .substring(0, 100);
 }
 
-// Render form
 app.get('/', (req, res) => {
-  res.render('index', { error: null });
+  res.render('index', { error: "Something went wrong!" });
+
 });
 
-// Handle form submit and download video
 app.post('/download', async (req, res) => {
   const url = req.body.url;
-  if (!url || !ytdl.validateURL(url)) {
-    return res.render('index', { error: 'Please enter a valid YouTube URL' });
-  }
+  if (!url) return res.status(400).send('No URL provided.');
 
   try {
     const info = await ytdl.getInfo(url);
     const title = sanitizeFilename(info.videoDetails.title);
-    const videoPath = path.join(__dirname, `${title}_video.mp4`);
-    const audioPath = path.join(__dirname, `${title}_audio.mp4`);
-    const outputPath = path.join(__dirname, `${title}.mp4`);
 
-    // Download video-only
+    const videoPath = path.resolve(__dirname, `${title}_video.mp4`);
+    const audioPath = path.resolve(__dirname, `${title}_audio.mp4`);
+    const outputPath = path.resolve(__dirname, `${title}.mp4`);
+
+    // Download video-only stream
+    const videoStream = ytdl(url, { quality: 'highestvideo' });
+    const videoFile = fs.createWriteStream(videoPath);
+    videoStream.pipe(videoFile);
+
     await new Promise((resolve, reject) => {
-      const videoStream = ytdl(url, { quality: 'highestvideo' });
-      videoStream.pipe(fs.createWriteStream(videoPath));
-      videoStream.on('end', resolve);
-      videoStream.on('error', reject);
+      videoFile.on('finish', resolve);
+      videoFile.on('error', reject);
     });
 
-    // Download audio-only
+    // Download audio-only stream
+    const audioStream = ytdl(url, { quality: 'highestaudio' });
+    const audioFile = fs.createWriteStream(audioPath);
+    audioStream.pipe(audioFile);
+
     await new Promise((resolve, reject) => {
-      const audioStream = ytdl(url, { quality: 'highestaudio' });
-      audioStream.pipe(fs.createWriteStream(audioPath));
-      audioStream.on('end', resolve);
-      audioStream.on('error', reject);
+      audioFile.on('finish', resolve);
+      audioFile.on('error', reject);
     });
 
-    // Merge video + audio with ffmpeg (must be installed on system)
+    // Merge using fluent-ffmpeg
     await new Promise((resolve, reject) => {
-      const cmd = `ffmpeg -y -i "${videoPath}" -i "${audioPath}" -c copy "${outputPath}"`;
-      exec(cmd, (error, stdout, stderr) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        // Clean up video/audio parts
-        fs.unlinkSync(videoPath);
-        fs.unlinkSync(audioPath);
-        resolve();
-      });
+      ffmpeg()
+        .input(videoPath)
+        .input(audioPath)
+        .outputOptions('-c copy') // copy streams without re-encoding
+        .on('error', (err) => {
+          console.error('Error during ffmpeg processing:', err);
+          reject(err);
+        })
+        .on('end', () => {
+          console.log('Merging finished!');
+          // Clean up separate files
+          fs.unlinkSync(videoPath);
+          fs.unlinkSync(audioPath);
+          resolve();
+        })
+        .save(outputPath);
     });
 
-    // Send file for download
-    res.download(outputPath, `${title}.mp4`, (err) => {
-      if (err) {
-        console.error('Error sending file:', err);
-      }
-      // Delete the merged file after sending
-      if (fs.existsSync(outputPath)) {
-        fs.unlinkSync(outputPath);
-      }
+    // After merging, send download link or success message
+    res.download(outputPath, (err) => {
+      if (err) console.error('Error sending file:', err);
+      // Delete merged file after sending (optional)
+      fs.unlinkSync(outputPath);
     });
+
   } catch (err) {
     console.error(err);
-    res.render('index', { error: 'Failed to download video. Try again!' });
+    res.status(500).send('Failed to download or merge video.');
   }
 });
 
+const PORT = 3000;
 app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
+  console.log(`Server running on http://localhost:${PORT}`);
 });
